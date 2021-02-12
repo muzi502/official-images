@@ -9,6 +9,7 @@ NEW_TAG=$(date +"%Y%m%d%H")
 TMP_DIR="/tmp/docker-library"
 ORIGIN_REPO="https://github.com/muzi502/official-images"
 UPSTREAM="https://github.com/docker-library/official-images"
+DOCKER_HUB_URL="https://hub.docker.com/v2/repositories/library"
 SCRIPTS_PATH=$(cd $(dirname "${BASH_SOURCE}") && pwd -P)
 SKIPE_IMAGES="windowsservercore"
 
@@ -55,6 +56,22 @@ sync_images() {
     unset IFS
 }
 
+get_all_images() {
+    ALL_IMAGES=""
+    URL="${DOCKER_HUB_URL}/?page_size=100"
+    while true ; do
+        ALL_IMAGES="$(curl -sSL ${URL} | jq -r '.results[].name' | tr '\n' ' ') ${ALL_IMAGES}"
+        URL="$(curl -sSL ${URL} | jq -r '.next')"
+        if [ "${URL}" = "null" ]; then break; fi
+    done
+    : > all_library_images.list
+    for image in ${ALL_IMAGES};do
+        if skopeo list-tags docker://${image} &> /dev/null; then
+            skopeo list-tags docker://${image} | jq ".Tags" | tr -d '[],\" ' | tr -s '\n' | sed "s|^|${image}:|g" >> all_library_images.list
+        fi
+    done
+}
+#get_all_images
 diff_images
 sync_images
 git tag ${NEW_TAG} --force
