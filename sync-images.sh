@@ -1,15 +1,18 @@
 #!/bin/bash
 set -eo pipefail
 
+GREEN_COL="\\033[32;1m"
+RED_COL="\\033[1;31m"
+YELLOW_COL="\\033[33;1m"
+NORMAL_COL="\\033[0;39m"
+
 REGISTRY_DOMAIN=$1
 : ${REGISTRY_DOMAIN:="registry.local"}
 REGISTRY_LIBRARY="${REGISTRY_DOMAIN}/library"
 
-NEW_TAG=$(date +"%Y%m%d%H")
+NEW_TAG=$(date +"%Y%m%d%H%M")
 TMP_DIR="/tmp/docker-library"
-ORIGIN_REPO="https://github.com/muzi502/official-images"
 UPSTREAM="https://github.com/docker-library/official-images"
-DOCKER_HUB_URL="https://hub.docker.com/v2/repositories/library"
 SCRIPTS_PATH=$(cd $(dirname "${BASH_SOURCE}") && pwd -P)
 SKIPE_IMAGES="windowsservercore"
 
@@ -17,24 +20,26 @@ cd ${SCRIPTS_PATH}
 mkdir -p ${TMP_DIR}
 
 diff_images() {
-    git remote remove upstream || true
+    git remote remove upstream &> /dev/null || true
     git remote add upstream ${UPSTREAM}
-    git fetch upstream
-    git rebase upstream/master
-    PRE_TAG=$(git tag -l | egrep --only-matching -E '^([[:digit:]]{12})' | sort -nr | head -n1) || true
-    PRE_TAG=${PRE_TAG:="3724fb6ed"}
+    git fetch --tag
+    git fetch --all
+    CURRENT_COMMIT=$(git log -1 upstream/master --format='%H')
+    LAST_TAG=$(git tag -l | egrep --only-matching -E '^([[:digit:]]{12})' | sort -nr | head -n1)
     IMAGES=$(git diff --name-only --ignore-space-at-eol --ignore-space-change \
-    --diff-filter=AM ${PRE_TAG} library | xargs -L1 -I {} sed "s|^|{}:|g" {} \
-    | sed -n "s| ||g;s|library/||g;s|:Tags:|:|p;s|:SharedTags:|:|p" | sort -n | grep -Ev "${SKIPE_IMAGES}")
+    --diff-filter=AM ${LAST_TAG} ${CURRENT_COMMIT} library | xargs -L1 -I {} sed "s|^|{}:|g" {} \
+    | sed -n "s| ||g;s|library/||g;s|:Tags:|:|p;s|:SharedTags:|:|p" | sort -u | sed "/${SKIPE_IMAGES}/d")
 }
 
 skopeo_copy() {
+    let CURRENT_NUM=1+${CURRENT_NUM}
+    echo -e "$YELLOW_COL Progress: ${CURRENT_NUM}/${TOTAL_NUMS} $NORMAL_COL"
     if skopeo copy --insecure-policy --src-tls-verify=false --dest-tls-verify=false -q docker://$1 docker://$2; then
-        echo "Sync $1 to $2 successfully" 
+        echo -e "$GREEN_COL Sync $1 successful $NORMAL_COL"
         echo ${name}:${tags} >> ${TMP_DIR}/${NEW_TAG}-successful.list
         return 0
     else
-        echo "Sync $1 to $2 failed" 
+        echo -e "$RED_COL Sync $1 failed $NORMAL_CO"
         echo ${name}:${tags} >> ${TMP_DIR}/${NEW_TAG}-failed.list
         return 1
     fi
@@ -42,7 +47,8 @@ skopeo_copy() {
 
 sync_images() {
     IFS=$'\n'
-    TOTAL_NUMS=$(echo ${IMAGES} | cut -d ':' -f2 | tr ',' '\n' | wc -l)
+    CURRENT_NUM=0
+    TOTAL_NUMS=$(echo ${IMAGES} | tr ',' ' ' | wc -w)
     for image in ${IMAGES}; do
         name="$(echo ${image} | cut -d ':' -f1)"
         tags="$(echo ${image} | cut -d ':' -f2 | cut -d ',' -f1)"
@@ -56,23 +62,14 @@ sync_images() {
     unset IFS
 }
 
-get_all_images() {
-    ALL_IMAGES=""
-    URL="${DOCKER_HUB_URL}/?page_size=100"
-    while true ; do
-        ALL_IMAGES="$(curl -sSL ${URL} | jq -r '.results[].name' | tr '\n' ' ') ${ALL_IMAGES}"
-        URL="$(curl -sSL ${URL} | jq -r '.next')"
-        if [ "${URL}" = "null" ]; then break; fi
-    done
-    : > all_library_images.list
-    for image in ${ALL_IMAGES};do
-        if skopeo list-tags docker://${image} &> /dev/null; then
-            skopeo list-tags docker://${image} | jq ".Tags" | tr -d '[],\" ' | tr -s '\n' | sed "s|^|${image}:|g" >> all_library_images.list
-        fi
-    done
+gen_repo_tag() {
+    if git rebase upstream/master; then
+        git tag ${NEW_TAG} --force
+        git push origin sync --force
+        git push origin --tag --force
+    fi
 }
-#get_all_images
+
 diff_images
 sync_images
-git tag ${NEW_TAG} --force
-git push origin --tag --force || true
+gen_repo_tag
